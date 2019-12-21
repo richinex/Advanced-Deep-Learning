@@ -1,0 +1,412 @@
+---
+title: "Multi Target Classification - Lab"
+author: "Richard Chukwu"
+output:
+  pdf_document:
+    toc: yes
+  html_document:
+    code_folding: hide
+    number_sections: yes
+    toc: yes
+    toc_float: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = T, warning = F, message = F)
+```
+
+# Load the required packages
+
+
+```{r}
+library(dplyr) # for data manipulation
+library(tidyr) # for data manipulation
+library(ggplot2) # for data visualization
+library(gmodels) # provides the CrossTable()
+library(keras) # for the deep learning part
+library(tfruns) # to separate our parameters from the model architecture
+set.seed(123) # set seed for reproducibility
+
+source("functions/train_val_test_split.R") # load the required partition function
+```
+
+## Data Preparation
+
+In this section describe our data and prepare it for the network
+
+### Data description
+
+In this exercise, we apply deep neural network for a classification task. The dataset used can be found on the UCI Machine Learning Repository maintained by the School of Information and Computer Science at the University of California. You can access this at https://archive.ics.uci.edu/ml/datasets/cardiotocography.
+This data consists of fetal CTGs, and the target variable classifies a patient into one of three categories: normal, suspect, and pathological. There are 2,126 rows in this dataset. The CTGs are classified by three expert obstetricians, and a consensus classification label is assigned to each of them as normal (N) (represented by 1), suspect (S) (represented by 2),and pathological (P) (represented by 3). There are 21 independent variables, and the main objective is to develop a classification model to correctly classify each patient into one of the three classes represented by N, S, and P.
+
+```{r}
+ctg_data <- read.csv('data/ctg_data.csv', sep = ',', header = TRUE)
+str(ctg_data)
+```
+
+### Normalization of numeric variables
+First we convert our data to a matrix, and strip of the variable names. then we use the normalize function from the keras package. the target class is also converted into a numeric format.
+
+```{r}
+ctg_matrix <- as.matrix(ctg_data)
+dimnames(ctg_matrix) <- NULL
+ctg_matrix[,1:21] <- normalize(ctg_matrix[,1:21])
+ctg_matrix[,22] <- as.numeric(ctg_matrix[,22]) -1 # we start the target values at zero
+
+```
+
+### Data partitioning
+
+Here we split our matrix data and label into a training and test set
+
+```{r}
+c(train, val, test) %<-% train_val_test_split(df = ctg_matrix, 
+                                              train_ratio = 0.7, 
+                                              val_ratio = 0.0, 
+                                              test_ratio = 0.3)
+
+trainX <- train[ ,1:21]
+trainY <- train[ ,22]
+testX <- test[, 1:21]
+testY <- test[ ,22]
+
+```
+
+### One hot encoding
+
+This enables us to represent a categorical variable as a binary class numeric matrix where the presence or absence of a class is simply represented by 1 or 0 respectively. we use the _to_categorical_ function form the keras package.
+
+```{r}
+trainLabels <- to_categorical(trainY)
+testLabels <- to_categorical(testY)
+print(testLabels[1:10,])
+```
+
+
+## Model Creation
+
+### Building our model architecture
+
+```{r}
+create_model_one <- function() {
+  keras_model_sequential() %>% 
+    layer_dense(units = 8,
+               activation = "relu",
+               input_shape = c(21)) %>% 
+    layer_dense(units = 3, activation = "softmax") %>% # 3 stands for the target classes
+    compile(loss = "categorical_crossentropy",
+            optimizer = "adam",
+            metrics = "accuracy")
+}
+```
+
+```{r}
+net1 <- create_model_one()
+history <- net1 %>% 
+  fit(x = trainX,
+      y = trainLabels,
+      batch_size = 32,
+      epochs = 200,
+      validation_split = 0.2,
+      callbacks = callback_tensorboard('ctg/one'))
+
+
+```
+
+Points to note: if the training data accuracy increases with the number of epochs, but the validation data accuracy decreases, that would suggest an overfitting of the model.
+
+```{r}
+tensorboard('ctg/one')
+```
+
+### Model Evaluation
+
+Here we assume the model loss and accuracy
+
+```{r}
+net1 %>%
+evaluate(testX, testLabels)
+```
+
+```{r}
+colSums(testLabels)
+```
+Converting to percentages
+```{r}
+prop.table(table(trainY))
+prop.table(table(testY))
+# (colSums(testLabels)/638) * 100
+```
+
+Using the colSums() to find the percentages of the different target classes, we can see that the highest number of samples belongs to the normal category of patients. we can use $75.7\%$ as abenchmark for the model performance. If we do not use any model and simply classify all cases in the test data as belonging to the normal category of patients, then we will still be correct about $75.7\%$ of the time since we will be right about all normal patients and incorrect about the other two categories.
+
+$75.7\%$, therefore, serves as our benchmark.
+
+### Confusion matrix
+
+For the predictions we use the predict_classes() from keras package.
+```{r}
+predY <- net1 %>%
+  predict_classes(testX)
+
+```
+
+Using the CrossTable() from the gmodels package
+```{r}
+CrossTable(predY, testY,
+           prop.chisq = FALSE, prop.c = FALSE, prop.r = FALSE,
+           dnn = c('predicted', 'actual'))
+```
+
+The matrix shows 468 patients accurately classified as being normal, 49 and 18 correct predictions for the suspect and pathological group respectively. To find our the prediction probabilities, we use the _predict_proba()_
+
+```{r}
+prob <- net1 %>%
+  predict_proba(testX)
+cbind(prob, predY, testY)[1:5,]
+```
+The first observation shows the highest probability of 0.9827 for the normal category of patients, and that is the reason the predicted class is identified as 0. For the fifth observation, the sample had the highest probability of 0.5014 for the normal category and was wrongly classified as normal whereas the actual class is suspect.
+
+## Performance Optimization
+
+### Addition of an extra hidden layer
+
+The first optimization we carry out is to add an additional hidden layer ot our previous model _net1_. 
+
+Here we set up our model function
+
+```{r parameter1}
+create_model_two <- function() {
+  keras_model_sequential() %>% 
+    layer_dense(units = 8,
+               activation = "relu",
+               input_shape = c(21)) %>% 
+    layer_dense(units = 5, activation = "relu") %>% # second hidden layer with 5 units
+    layer_dense(units = 3, activation = "softmax") %>% # 3 stands for the target classes
+    
+    compile(loss = "categorical_crossentropy",
+            optimizer = "adam",
+            metrics = "accuracy")
+}
+```
+
+
+Here the model is created and fitted.
+
+The history2 stores the model output related information.
+
+```{r}
+net2 <- create_model_two()
+history2 <- net2 %>% 
+  fit(x = trainX,
+      y = trainLabels,
+      batch_size = 32,
+      epochs = 200,
+      validation_split = 0.2,
+      callbacks = callback_tensorboard('ctg/two'))
+
+plot(history2)
+
+```
+
+ - The accuracy of the training and validation data remain contant until about 16 epochs where we see a increase in accuracy of the training data. On the other hand, the accuracy of the validation data remains constant until about 16 epochs where it experiences a decline. The accuracy picks up again after 27 epochs and remained fairly constant through out the training.
+ - The plot shows decreasing loss values for the training data up until 50 epochs where the loss stabilizes and fairly constant loss for the validation data
+ 
+#### Model Evaluation
+
+In this section we create predictions based on our test data
+```{r}
+predY <- net2 %>%
+predict_classes(testX)
+
+net2 %>%
+evaluate(testX, testLabels)
+```
+Our second model shows an overall accuracy of $86.21\%$, an additional $2.36\%$ was gained by adding an additional hidden layer to our network.
+
+#### Confusion Matrix
+
+```{r}
+CrossTable(predY, testY,
+           prop.chisq = FALSE, prop.c = FALSE, prop.r = FALSE,
+           dnn = c('predicted', 'actual'))
+```
+
+### Increasing the number of units in the first hidden layer
+
+The second optimization we carry out is to increase the number of units in our first hidden layer ot our previous model _net2_. 
+
+Here we set up our model function
+
+```{r parameter2}
+create_model_three <- function() {
+  keras_model_sequential() %>% 
+    layer_dense(units = 30,
+               activation = "relu",
+               input_shape = c(21)) %>% 
+    layer_dense(units = 5, activation = "relu") %>% # second hidden layer with 5 units
+    layer_dense(units = 3, activation = "softmax") %>% # 3 stands for the target classes
+    
+    compile(loss = "categorical_crossentropy",
+            optimizer = "adam",
+            metrics = "accuracy")
+}
+```
+
+
+Here the model is created and fitted.
+
+The history2 stores the model output related information.
+
+```{r}
+net3 <- create_model_three()
+history3 <- net3 %>% 
+  fit(x = trainX,
+      y = trainLabels,
+      batch_size = 32,
+      epochs = 200,
+      validation_split = 0.2,
+      callbacks = callback_tensorboard('ctg/three'))
+
+plot(history3)
+
+```
+
+ - from the accuracy plot we see a plateau in both the training and validation data after 70 epochs.
+ 
+#### Model evaluation
+
+In this section we create predictions based on our test data
+```{r}
+predY <- net3 %>%
+predict_classes(testX)
+
+net3 %>%
+evaluate(testX, testLabels)
+```
+
+Confusion MATRIX
+```{r}
+CrossTable(predY, testY,
+           prop.chisq = FALSE, prop.c = FALSE, prop.r = FALSE,
+           dnn = c('predicted', 'actual'))
+```
+The confusion matrix shows an increase in the percentage of correct classification for the normal and pathological cases, compared to _net2_ while the classification of the suspect cases remains constant.
+
+
+### Guarding against the inbalance problem, adding additional hidden layers.
+
+A careful examination of our original data set shows an imbalance of the classes
+
+```{r}
+barplot(prop.table(table(ctg_data$NSP)),
+col = rainbow(3),
+ylim = c(0, 0.8),
+ylab = 'Proportion',
+xlab = 'NSP',
+cex.names = 1.5,
+xaxt = "n")
+axis(1, at=c(0.7,1.9,3.1), labels= c("normal", "suspect", "pathological"))
+```
+
+From the bar plot we estiimate the percentages of normal, suspect, and pathological patients as approximately 78%, 14%, and 8% respectively. Ananlysis of the target classes shows that the number of normal patients is about 5.6 times (1,655/295) greater than the number of suspect patients and about 9.4 times greater than the number of pathological patients. The dataset exhibits a pattern where classes are not balanced. 
+This could result in a classification model that is biased towards the class with the highest number of observations. To address this problem, we make use of class weights while building our model.
+
+Here we set up our model function
+
+In this new model we have added a dropout layer with dropout rates of 40%, 30%, and 20%. For instance, with a dropout rate of 0.4 (or 40%) after the first hidden layer, 40% of the units in the first hidden layer are randomly dropped to zero during network training. This helps to avoid any overfitting that may occur because of the higher number of units in the hidden layers.
+
+```{r parameter3}
+create_model_four <- function() {
+  keras_model_sequential() %>% 
+    layer_dense(units = 40,
+               activation = "relu",
+               input_shape = c(21)) %>%
+    layer_dropout(rate = 0.4) %>%
+    layer_dense(units = 30, activation = "relu") %>% # second hidden layer with 5 units
+
+    layer_dropout(rate = 0.3) %>%
+    layer_dense(units = 8, activation = "relu") %>% 
+    layer_dropout(rate = 0.2) %>% 
+    layer_dense(units = 3, activation = "softmax") %>% # 3 stands for the target classes
+    compile(loss = "categorical_crossentropy",
+            optimizer = "adam",
+            metrics = "accuracy")
+}
+```
+
+Here the model is created and fitted.
+
+The history4 stores the model output related information.
+
+```{r}
+net4 <- create_model_four()
+history4 <- net4 %>% 
+  fit(x = trainX,
+      y = trainLabels,
+      batch_size = 32,
+      epochs = 200,
+      validation_split = 0.2,
+      class_weight = list("0" = 1,"1"= 5.6, "2" = 9.4),
+      callbacks = list(callback_tensorboard('ctg/five'),
+                       callback_reduce_lr_on_plateau(factor = 0.0001)))
+
+plot(history4)
+
+```
+
+
+ - from the accuracy plot we see a plateau in both the training and validation data after 52 epochs.
+ 
+#### Model evaluation
+
+In this section we create predictions based on our test data
+```{r}
+predY <- net4 %>%
+predict_classes(testX)
+
+net4 %>%
+evaluate(testX, testLabels)
+```
+
+Confusion MATRIX
+```{r}
+CrossTable(predY, testY,
+           prop.chisq = FALSE, prop.c = FALSE, prop.r = FALSE,
+           dnn = c('predicted', 'actual'))
+```
+
+
+## Saving the Final Model
+
+```{r}
+# Save and reload model
+save_model_hdf5(net4,
+filepath = "model/net_82" ,
+overwrite = TRUE,
+include_optimizer = TRUE)
+
+```
+
+# Hyperparameter Tuning
+
+Now we could move forward and adapt 
+
+- network topology, 
+
+- count of layers, 
+
+- type of layers, 
+
+- count of nodes per layer, 
+
+- loss function, 
+
+- activation function, 
+
+- learning rate, 
+
+- and much more, ...
+
+Play around with the parameters and see how they impact the result.
+
